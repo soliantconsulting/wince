@@ -10,7 +10,7 @@ const scanKey = s => s.folder + (cfgOf(s) === DEFAULT_CFG ? "" : "|" + cfgOf(s))
 const fromKey = k => { const [folder, config] = k.split("|"); return { folder, config: config || DEFAULT_CFG }; };
 const scanLabel = s => s.folder + (cfgOf(s) === DEFAULT_CFG ? "" : "  ·  " + cfgOf(s));
 const day = iso => iso ? new Date(iso.length <= 10 ? iso + "T12:00:00" : iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
-const VERSION = "0.1.0";  // keep in step with VERSION in wince/core.py
+const VERSION = "0.2.0";  // keep in step with VERSION in wince/core.py
 const SERVER = location.origin + "/";
 const TYPE_LABEL = { conflict: "Conflict", overlap: "Overlap", redundant: "Duplicate", dead: "Not loading", heavy: "Large", provenance: "Loads everywhere" };
 const flowUrl = (folder, config) => "flow.html?folder=" + encodeURIComponent(folder) + (config && config !== DEFAULT_CFG ? "&config=" + encodeURIComponent(config) : "");

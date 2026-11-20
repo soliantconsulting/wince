@@ -25,7 +25,7 @@ import sys
 import tempfile
 import threading
 
-VERSION = "0.1.0"  # keep in step with VERSION in app/common.js
+VERSION = "0.2.0"  # keep in step with VERSION in app/common.js
 HOME = os.path.expanduser("~")
 DEFAULT_CLAUDE = os.path.join(HOME, ".claude")
 # The config folder being scanned. scan() swaps these for a custom folder (what CLAUDE_CONFIG_DIR points at).
