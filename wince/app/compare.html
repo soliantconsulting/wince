@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wince · compare</title>
+<link rel="icon" type="image/png" href="soliant-curve.png">
+<link rel="stylesheet" href="style.css?v=15">
+<script src="vendor/d3.min.js"></script>
+<script src="vendor/d3-sankey.min.js"></script>
+<style>
+  svg text { fill: var(--ink); font-size: 12px; }
+  svg .lnk { fill: none; stroke-opacity: .3; }
+  svg .nd rect { cursor: pointer; }
+  svg .dim { opacity: .15; }
+  .totals { display: flex; justify-content: space-between; font-weight: 600; margin: 4px 0 2px; }
+  .tag { font-size: 11px; font-weight: 500; border-radius: 16px; padding: 2px 9px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; height: fit-content; }
+  .diffrow { display: grid; grid-template-columns: 1fr auto; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .diffrow:hover .t { color: var(--accent); }
+  .diffrow .t { font-weight: 600; }
+  .diffrow p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; grid-column: 1 / -1; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .split > div { background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 8px; font-size: 12.5px; overflow: hidden; }
+  .split h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .split pre { font-size: 11.5px; max-height: 320px; overflow: auto; }
+</style>
+</head>
+<body>
+<header class="appbar" id="topbar"></header>
+<div class="pagehead">
+  <select id="a" class="title-select" aria-label="Left folder"></select><span class="vs">vs</span><select id="b" class="title-select" aria-label="Right folder"></select>
+  <span class="grow"></span>
+  <label class="check"><input type="checkbox" id="collapse" checked> fold identical sources into one band</label>
+</div>
+<main id="main">
+  <section class="canvas card">
+    <div class="toolbar"><span>Left flows into the first folder, right into the second. A source that flows only one way is a difference. Click a bar for details.</span></div>
+    <div class="totals"><span id="ta"></span><span id="tb"></span></div>
+    <svg id="sankey"></svg>
+  </section>
+  <aside id="side" class="card"></aside>
+</main>
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="common.js?v=15"></script>
+<script type="module">
+const side = document.getElementById("side");
+// Both sides are scanned live; the choices are the folders you've looked at recently.
+const recent = await recentScans().catch(() => []);
+const ka = params.get("a") ? fromKey(params.get("a")) : recent[0];
+renderTopBar("compare", ka);
+addScanButton(document.getElementById("b"));
+const kb = params.get("b") ? fromKey(params.get("b")) : recent.find(r => scanKey(r) !== scanKey(ka || {}));
+const stop = html => {
+  for (const el of document.querySelectorAll(".pagehead > :not(#scan)")) el.hidden = true;
+  document.getElementById("main").innerHTML = `<div class="empty card">${html}</div>`;
+  throw new Error("can't compare");
+};
+if (!ka || !kb) stop(`<h2>Compare needs two folders</h2>
+    <p>${ka ? `So far you've only looked at <b>${esc(ka.folder)}</b>.` : "Nothing is scanned yet."} Click the new-folder button (${icon("newfolder")}) above to add another, then come back here.</p>`);
+let A, B;
+document.getElementById("side").innerHTML = `<div class="meta">Scanning ${esc(ka.folder)}…</div>`;
+try { [A, B] = (await Promise.all([loadScan(ka.folder, ka.config), loadScan(kb.folder, kb.config)])).map(r => r.scan); }
+catch (e) { failed(e); stop(`<h2>Couldn't scan both folders</h2><p>${esc(e.message)}</p>`); }
+const choices = [...new Map([A, B, ...recent].map(s => [scanKey(s), s])).values()];
+for (const [id, v] of [["a", A], ["b", B]]) {
+  const el = document.getElementById(id);
+  el.innerHTML = choices.map(s => `<option value="${esc(scanKey(s))}">${esc(scanLabel(s))}</option>`).join("");
+  el.value = scanKey(v); fitSelect(el);
+  el.onchange = () => { location.search = `?a=${encodeURIComponent(document.getElementById("a").value)}&b=${encodeURIComponent(document.getElementById("b").value)}`; };
+}
+document.title = `wince · compare`;
+// Two scans of one folder differ only by config folder, so name them by that.
+const short = scan => A.folder === B.folder ? cfgOf(scan) : scan.folder.split("/").pop();
+
+// Union of sources by id; a source's id comes from its origin, so the same file matches across folders.
+const map = new Map();
+for (const [side_, scan] of [["a", A], ["b", B]])
+  for (const s of scan.sources) if (s.kind !== "harness") {
+    const m = map.get(s.id) || { ...s, a: 0, b: 0, sa: null, sb: null };
+    m[side_] = s.tokens; m["s" + side_] = s; map.set(s.id, m);
+  }
+const all = [...map.values()];
+const same = s => s.a === s.b;
+const findIds = scan => new Set(scan.findings.map(f => f.id));
+const fa = findIds(A), fb = findIds(B);
+
+// Project files, auto memory and local MCP servers belong to the folder; the rest (connectors, plugin hooks, built-ins) differ because the sessions do.
+const byFolderCause = s => s.layer === "project" || s.kind === "memory" || s.label.endsWith("(MCP, local)");
+const diffs = [
+  ...all.filter(s => !same(s)).map(s => ({
+    kind: "source", s, group: byFolderCause(s) ? "folder" : "session",
+    tag: !s.a ? `only ${short(B)}` : !s.b ? `only ${short(A)}` : "changed",
+    title: s.label, body: !s.a || !s.b ? s.origin : `${fmt(s.a)} → ${fmt(s.b)} tokens · ${s.origin}`,
+  })),
+  ...B.findings.filter(f => !fa.has(f.id)).map(f => ({ kind: "finding", group: "finding", f, scan: B, tag: `only ${short(B)}`, title: f.title, body: f.body })),
+  ...A.findings.filter(f => !fb.has(f.id)).map(f => ({ kind: "finding", group: "finding", f, scan: A, tag: `only ${short(A)}`, title: f.title, body: f.body })),
+].sort((x, y) => (y.s ? Math.abs(y.s.a - y.s.b) : 0) - (x.s ? Math.abs(x.s.a - x.s.b) : 0));
+const GROUPS = [
+  ["folder", "Because of the folder", "Project instructions, memory and settings that belong to one folder."],
+  ["session", "Because the sessions differ", `Connectors, plugin hook output and built-ins come from the last session in each folder (${day(A.runtime?.date) || "none"} vs ${day(B.runtime?.date) || "none"}), so they can differ for reasons outside either folder.`],
+  ["finding", "Findings on one side only", ""],
+];
+
+function back() { side.querySelector("#back").onclick = e => { e.preventDefault(); overview(); highlight(null); }; }
+function overview() {
+  const shared = all.filter(same).length;
+  side.innerHTML = `<h2>What's different</h2><div class="meta">${shared} sources are identical on both sides; ${diffs.length} differences, biggest first.</div>` +
+    GROUPS.map(([g, title, note]) => {
+      const rows = diffs.map((d, i) => [d, i]).filter(([d]) => d.group === g);
+      return rows.length ? `<div class="label-sm">${title} (${rows.length})</div>${note ? `<div class="meta">${esc(note)}</div>` : ""}` +
+        rows.map(([d, i]) => `<div class="diffrow" data-i="${i}"><span class="t">${esc(d.title)}</span><span class="tag">${esc(d.tag)}</span><p>${esc(d.body)}</p></div>`).join("") : "";
+    }).join("");
+  side.querySelectorAll(".diffrow").forEach(el => el.onclick = () => showDiff(diffs[el.dataset.i]));
+}
+function sideHTML(s, scan) {
+  if (!s) return `<div><h4>${esc(short(scan))}</h4><span class="meta">Not here.</span></div>`;
+  return `<div><h4>${esc(short(scan))} · ~${fmt(s.tokens)}</h4>${s.excerpt ? `<pre>${esc(s.excerpt)}</pre>` : ""}${s.items ? `<ul>${s.items.slice(0, 40).map(i => `<li>${esc(i.name)}</li>`).join("")}</ul>` : ""}</div>`;
+}
+function showDiff(d) {
+  if (d.kind === "source") {
+    highlight([d.s.id]);
+    side.innerHTML = `<div class="meta"><a href="#" id="back">← All differences</a></div><h2>${esc(d.title)}</h2><span class="tag">${esc(d.tag)}</span>
+      <p class="origin">${esc(d.s.origin)}</p><div class="split">${sideHTML(d.s.sa, A)}${sideHTML(d.s.sb, B)}</div>`;
+  } else {
+    const f = d.f, det = f.detail || { pieces: [], options: [] };
+    highlight(f.sources);
+    side.innerHTML = `<div class="meta"><a href="#" id="back">← All differences</a></div><h2>${esc(f.title)}</h2><span class="tag">${esc(d.tag)}</span>
+      <p>${esc(f.body)}</p>${det.pieces.map(p => `<div class="piece c-${esc(f.type)}"><div class="origin">${esc(p.path)}</div>${p.quote ? `<blockquote>${esc(p.quote)}</blockquote>` : `<p class="meta">This text has changed or is gone since the check.</p>`}</div>`).join("")}
+      ${det.options.map(o => `<div class="opt ${o.recommended ? "rec" : ""}"><div class="t">${esc(o.title)}</div><p>${esc(o.how)}</p></div>`).join("")}
+      <p class="meta">Full detail: <a href="${flowUrl(d.scan.folder, cfgOf(d.scan))}">open ${esc(short(d.scan))} in Flow</a></p>`;
+  }
+  back(); side.scrollTop = 0;
+}
+
+let linkSel, nodeSel;
+function draw() {
+  const fold = document.getElementById("collapse").checked;
+  let mids = all;
+  if (fold) {
+    const s = all.filter(same);
+    mids = [{ id: "same", layer: "builtin", label: `${s.length} identical sources`, origin: "", a: s.reduce((t, x) => t + x.a, 0), b: s.reduce((t, x) => t + x.b, 0) }, ...all.filter(x => !same(x))];
+  }
+  const nodes = [{ id: "A", col: 0 }, ...mids.map(s => ({ id: s.id, col: 1, s })), { id: "B", col: 2 }];
+  const links = [];
+  mids.forEach((s, i) => {
+    if (s.a) links.push({ source: 0, target: i + 1, value: s.a, s });
+    if (s.b) links.push({ source: i + 1, target: nodes.length - 1, value: s.b, s });
+  });
+  const width = Math.max(480, document.querySelector(".canvas").clientWidth - 40), height = Math.max(380, mids.length * 26);
+  const svg = d3.select("#sankey").attr("width", width).attr("height", height);
+  svg.selectAll("*").remove();
+  const g = d3.sankey().nodeWidth(12).nodePadding(10).nodeSort(null).nodeAlign(n => n.col).extent([[1, 6], [width - 1, height - 6]])({ nodes: nodes.map(d => ({ ...d })), links: links.map(d => ({ ...d })) });
+  const col = s => css("--" + s.layer);
+  linkSel = svg.append("g").selectAll("path").data(g.links).join("path").attr("class", "lnk").attr("d", d3.sankeyLinkHorizontal())
+    .attr("stroke", d => col(d.s)).attr("stroke-width", d => Math.max(1, d.width));
+  nodeSel = svg.append("g").selectAll("g").data(g.nodes).join("g").attr("class", "nd");
+  nodeSel.append("rect").attr("x", d => d.x0).attr("y", d => d.y0).attr("width", d => d.x1 - d.x0).attr("height", d => Math.max(2, d.y1 - d.y0))
+    .attr("fill", d => d.s ? col(d.s) : css("--ink"))
+    .on("click", (e, d) => { const dd = d.s && diffs.find(x => x.s && x.s.id === d.s.id); if (dd) showDiff(dd); });
+  nodeSel.filter(d => d.s).append("text").attr("x", d => d.x0 - 8).attr("y", d => (d.y0 + d.y1) / 2).attr("dy", "0.35em").attr("text-anchor", "end")
+    .text(d => d.s.a ? fmt(d.s.a) : "—");
+  nodeSel.filter(d => d.s).append("text").attr("x", d => d.x1 + 8).attr("y", d => (d.y0 + d.y1) / 2).attr("dy", "0.35em")
+    .text(d => `${d.s.label}  ${d.s.b ? fmt(d.s.b) : "—"}${same(d.s) ? "" : "  ◆"}`);
+  const ta = all.reduce((t, s) => t + s.a, 0), tb = all.reduce((t, s) => t + s.b, 0);
+  document.getElementById("ta").textContent = `${scanLabel(A)} · ${fmt(ta)} tokens`;
+  document.getElementById("tb").textContent = `${scanLabel(B)} · ${fmt(tb)} tokens (${tb >= ta ? "+" : "−"}${fmt(Math.abs(tb - ta))})`;
+}
+function highlight(ids) {
+  if (!linkSel) return;
+  if (!ids || !ids.length) { linkSel.classed("dim", false); nodeSel.classed("dim", false); return; }
+  linkSel.classed("dim", d => !ids.includes(d.s.id));
+  nodeSel.classed("dim", d => d.s && !ids.includes(d.s.id));
+}
+document.getElementById("collapse").onchange = draw;
+window.onresize = draw;
+addSplitter();
+draw(); overview();
+</script>
+</body>
+</html>

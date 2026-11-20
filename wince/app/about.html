@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wince · about</title>
+<link rel="icon" type="image/png" href="soliant-curve.png">
+<link rel="stylesheet" href="style.css?v=15">
+<style>
+  .about { grid-column: 1 / -1; padding: 24px 32px; max-width: 760px; height: fit-content; overflow: auto; }
+  .about h2 { margin: 0 0 4px; font-weight: 500; }
+  .about h3 { margin: 22px 0 6px; font-size: 14px; font-weight: 600; }
+  .about p, .about li { line-height: 1.55; }
+  .about ul { padding-left: 20px; margin: 4px 0; }
+  .about dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0 0; }
+  .about dt { color: var(--muted); }
+  .about dd { margin: 0; font-family: ui-monospace, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header class="appbar" id="topbar"></header>
+<main id="main" style="grid-template-columns: 1fr">
+  <section class="card about" id="about"></section>
+</main>
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="common.js?v=15"></script>
+<script type="module">
+renderTopBar("about");
+const recent = await recentScans().catch(() => []);
+document.getElementById("about").innerHTML = `
+  <h2>wince <span class="meta">version ${VERSION}</span></h2>
+  <p>Shows everything that reaches Claude in a session for one folder, where each piece comes from, and where pieces conflict or repeat.</p>
+
+  <h3>Use</h3>
+  <ul>
+    <li><b>Flow</b>: one folder as a sankey. Click a lane to see it, double-click to open its file.</li>
+    <li><b>Compare</b>: two folders, or one folder under two config folders, side by side.</li>
+    <li><b>Find conflicts</b>: Claude reads the instructions for contradictions (about 30 seconds).</li>
+  </ul>
+
+  <h3>Privacy</h3>
+  <ul>
+    <li>Scans read local files and stay on this machine. Only <b>Find conflicts</b> sends text out, to <code>claude -p</code> on your account.</li>
+    <li>Saved: recent folders and conflict checks, owner-only. Checks keep where each quote is, not the quote. <b>Forget</b> deletes one.</li>
+  </ul>
+
+  <h3>Limits</h3>
+  <ul>
+    <li>It can't see claude.ai organization instructions or full tool schemas. Tokens are estimates.</li>
+    <li>It relies on Claude Code's session logs, an internal format. After a Claude Code update, wince warns if something stops showing up.</li>
+  </ul>
+
+  <dl>
+    <dt>Recent folders</dt><dd>${recent.length}</dd>
+    <dt>Saved data</dt><dd>~/.wince/state.json (or $WINCE_HOME)</dd>
+    <dt>Server</dt><dd>${esc(location.origin)}</dd>
+  </dl>
+`;
+</script>
+</body>
+</html>

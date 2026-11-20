@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wince · flow</title>
+<link rel="icon" type="image/png" href="soliant-curve.png">
+<link rel="stylesheet" href="style.css?v=15">
+<script src="vendor/d3.min.js"></script>
+<script src="vendor/d3-sankey.min.js"></script>
+<style>
+  svg text { fill: var(--ink); font-size: 12px; }
+  svg .lnk { fill: none; stroke-opacity: .28; }
+  svg .lnk:hover { stroke-opacity: .6; }
+  svg .nd rect { cursor: pointer; }
+  svg .dim { opacity: .15; }
+  .items li { margin: 2px 0; }
+  .items small { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="appbar" id="topbar"></header>
+<div class="pagehead">
+  <select id="folder" class="title-select" aria-label="Folder"></select>
+  <span class="pop-wrap" id="cfgwrap" hidden>
+    <button id="settings" class="icon-btn" aria-label="Settings" aria-expanded="false" aria-controls="settingsPop" title="Settings"></button>
+    <div class="popover card" id="settingsPop" hidden>
+      <label class="label-sm" for="config">Claude config folder</label>
+      <select id="config"></select>
+      <p class="meta">Which config folder to look through: ~/.claude, or another one you run Claude Code with through CLAUDE_CONFIG_DIR.</p>
+    </div>
+  </span>
+  <span class="meta" id="meta"><span id="scanned"></span><span id="session"></span></span>
+  <span class="grow"></span>
+  <button id="check" class="btn-outline" title="Claude reads this folder's CLAUDE.md files, memory and hook output and points out where they contradict or repeat each other (about 30 seconds)"><span>Find conflicts</span></button>
+</div>
+<main id="main">
+  <section class="canvas card">
+    <div class="toolbar">
+      <span>Line width = tokens Claude receives every turn (≈ characters ÷ 4). Click any bar for details.</span>
+      <span class="grow"></span>
+      <label class="check"><input type="checkbox" id="harness"> show Claude Code's built-in system prompt</label>
+    </div>
+    <svg id="sankey"></svg>
+    <div class="label-sm">Active here, but adds no text</div>
+    <div class="strip" id="zero"></div>
+    <div class="label-sm">On disk, but not loaded here</div>
+    <div class="strip" id="notloaded"></div>
+  </section>
+  <aside id="side" class="card"></aside>
+</main>
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="common.js?v=15"></script>
+<script type="module">
+const side = document.getElementById("side");
+document.querySelector("#check span").insertAdjacentHTML("beforebegin", icon("search"));
+// Every page load scans the folder live; only the conflict check is saved.
+const recent = await recentScans().catch(() => []);
+const want = params.get("folder") ? { folder: params.get("folder"), config: params.get("config") || DEFAULT_CFG } : recent[0];
+renderTopBar("flow", want);
+addScanButton(document.getElementById("folder"), want && want.config);
+const hideHead = () => { for (const id of ["folder", "meta", "check"]) document.getElementById(id).hidden = true; };
+if (!want) { emptyState(); hideHead(); throw new Error("nothing scanned yet"); }
+let W, R;
+document.getElementById("side").innerHTML = `<div class="meta">Scanning ${esc(want.folder)}…</div>`;
+try { ({ scan: W, recent: R } = await loadScan(want.folder, want.config)); } catch (e) {
+  failed(e); hideHead();
+  document.getElementById("main").innerHTML = `<div class="empty card"><h2>Couldn't scan ${esc(want.folder)}</h2><p>${esc(e instanceof TypeError ? "The wince server isn't running. Start it with wince serve." : e.message)}</p></div>`;
+  throw e;
+}
+
+const sel = document.getElementById("folder");
+sel.innerHTML = [...new Set([W.folder, ...R.map(r => r.folder)])].sort().map(f => `<option>${esc(f)}</option>`).join("");
+sel.value = W.folder; fitSelect(sel);
+sel.onchange = () => { location.href = flowUrl(sel.value, cfgOf(W)); };
+// Config folder: every one found on this machine.
+const cfgSel = document.getElementById("config");
+const cfgs = [...new Set([cfgOf(W), ...(W.configs || [])])].sort();
+if (cfgs.length > 1 || cfgOf(W) !== DEFAULT_CFG) {
+  const wrap = document.getElementById("cfgwrap"), gear = document.getElementById("settings"), pop = document.getElementById("settingsPop");
+  wrap.hidden = false;
+  gear.innerHTML = icon("settings");
+  const toggle = open => { pop.hidden = !open; gear.setAttribute("aria-expanded", open); if (open) cfgSel.focus(); };
+  gear.onclick = () => toggle(pop.hidden);
+  document.addEventListener("click", e => { if (!wrap.contains(e.target)) toggle(false); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && !pop.hidden) { toggle(false); gear.focus(); } });
+  cfgSel.innerHTML = cfgs.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  cfgSel.value = cfgOf(W);
+  cfgSel.onchange = () => { location.href = flowUrl(W.folder, cfgSel.value); };
+}
+document.title = `wince · ${scanLabel(W)}`;
+document.getElementById("scanned").textContent = cfgOf(W) === DEFAULT_CFG ? "" : `With ${cfgOf(W)} · `;
+document.getElementById("session").textContent = W.runtime ? `Loaded pieces from your last session here, ${day(W.runtime.date)}` : "No session here yet";
+const layerOf = id => W.layers.find(l => l.id === id);
+const srcById = id => W.sources.find(s => s.id === id);
+
+const check = btn => post("/api/check", { folder: W.folder, config: cfgOf(W) }, btn, "Checking… (~30 s)",
+  "Claude is reading this folder's instructions, memory and hook output for conflicts. This takes about 30 seconds.").then(r => r && location.reload());
+const forget = btn => confirm("Forget this conflict check? Running it again takes about 30 seconds.") &&
+  post("/api/forget", { folder: W.folder, config: cfgOf(W) }, btn, "Forgetting…").then(r => r && location.reload());
+document.getElementById("check").onclick = e => check(e.currentTarget);
+if (W.check) {
+  const c = document.getElementById("check");
+  c.querySelector("span").textContent = "Recheck conflicts";
+  c.title = `Last checked ${day(W.check.checkedAt)}${W.check.stale ? ", before these files last changed" : ""}. ` + c.title;
+}
+
+function back(fn = overview) { const b = side.querySelector("#back"); if (b) b.onclick = e => { e.preventDefault(); fn(); highlight(null); }; }
+function findingHTML(f) { return `<div class="finding c-${esc(f.type)}" data-f="${esc(f.id)}"><div class="k">${esc(TYPE_LABEL[f.type] || f.type)}${f.analyzed ? " · conflict check" : ""}</div><div class="t">${esc(f.title)}</div><p>${esc(f.body)}</p></div>`; }
+function bindFindings() { side.querySelectorAll(".finding[data-f]").forEach(el => el.onclick = () => showFinding(W.findings.find(f => f.id === el.dataset.f))); }
+
+function overview() {
+  const mine = W.sources.filter(s => s.kind !== "harness");
+  const total = mine.reduce((a, s) => a + s.tokens, 0);
+  const checkCard = W.check
+    ? `<span class="meta">Conflict check from ${day(W.check.checkedAt)} · <button class="link-btn" id="forget" title="Delete the saved check from ~/.wince"><span>Forget</span></button></span>`
+    : `<div class="callout"><b>Instructions not checked for conflicts yet</b><p>wince can ask Claude to read this folder's CLAUDE.md files, memory and hook output and point out where they disagree or repeat each other. Takes about 30 seconds.</p>
+       <button class="btn-outline" id="check2">${icon("search")}<span>Find conflicts</span></button></div>`;
+  side.innerHTML = `<h2>Overview</h2><div class="meta">Everything here reaches Claude before you type a word.</div>
+    <div><span class="stat"><b>${fmt(total)}</b><small>tokens from sources you control</small></span><span class="stat"><b>${mine.length}</b><small>sources</small></span><span class="stat"><b>${W.findings.length}</b><small>findings</small></span></div>
+    ${W.notes.map(n => `<div class="note">${esc(n)}</div>`).join("")}
+    ${W.check?.stale ? `<div class="note">These files changed after the conflict check on ${day(W.check.checkedAt)}, so its findings may be out of date. Recheck conflicts to update them.</div>` : ""}
+    <div class="label-sm row">Findings ${W.check ? checkCard : ""}</div>${W.check ? "" : checkCard}
+    ${W.findings.map(findingHTML).join("") || '<div class="meta">None.</div>'}
+    <div class="label-sm">What wince can't see</div><ul class="meta">${W.blind.map(b => `<li>${esc(b)}</li>`).join("")}</ul>`;
+  bindFindings();
+  const c2 = document.getElementById("check2");
+  if (c2) c2.onclick = () => check(c2);
+  const fg = document.getElementById("forget");
+  if (fg) fg.onclick = () => forget(fg);
+}
+
+function showSource(s) {
+  const fs = W.findings.filter(f => f.sources.includes(s.id));
+  side.innerHTML = `<div class="meta"><a href="#" id="back">← Overview</a> · ${esc(layerOf(s.layer).label)}</div>
+    <h2>${esc(s.label)}</h2><div class="origin">${esc(s.origin)}</div>
+    ${s.path ? `<button class="btn-outline" id="openfile" title="Open ${esc(s.path)} (or double-click its lane)"><span>Open in editor</span></button>` : ""}
+    <div><span class="stat"><b>~${fmt(s.tokens)}</b><small>tokens / turn${s.estimated ? " (guess)" : ""}</small></span>${s.count ? `<span class="stat"><b>${s.count}</b><small>items</small></span>` : ""}</div>
+    ${s.imported_by ? `<p class="meta">Imported by ${esc(s.imported_by)}</p>` : ""}
+    ${s.excerpt ? `<div class="label-sm">Content</div><pre>${esc(s.excerpt)}</pre>` : ""}
+    ${s.items ? `<div class="label-sm">Items</div><ul class="items">${s.items.map(i => `<li><b>${esc(i.name)}</b>${i.tokens ? ` <small>~${fmt(i.tokens)}</small>` : ""}${i.note ? ` <small>${esc(i.note)}</small>` : ""}${i.desc ? `<br><small>${esc(i.desc.slice(0, 220))}</small>` : ""}${i.path ? `<br><small class="origin">${esc(i.path)}</small>` : ""}</li>`).join("")}</ul>` : ""}
+    <div class="label-sm">Findings (${fs.length})</div>${fs.map(findingHTML).join("") || '<div class="meta">None.</div>'}`;
+  back(); bindFindings(); side.scrollTop = 0;
+  const ob = side.querySelector("#openfile");
+  if (ob) ob.onclick = () => openSource(s);
+}
+
+// Open the source's file or folder through the server (only paths the scan recorded).
+async function openSource(s) {
+  if (!s.path) return toast(`${esc(s.label)} has no file of its own to open.`, 4000);
+  if (location.protocol === "file:") return toast("This page was opened as a file, so it can't open files. " + NEED_SERVER, 15000);
+  try {
+    const res = await fetch("/api/open", { method: "POST", headers: { "Content-Type": "application/json", "X-Wince": "1" }, body: JSON.stringify({ folder: W.folder, config: cfgOf(W), source: s.id }) });
+    const r = await res.json();
+    toast(res.ok ? `Opened ${esc(r.opened)}.` : esc(r.error), res.ok ? 3000 : 8000);
+  } catch (e) { toast("Can't reach the wince server. " + NEED_SERVER, 15000); }
+}
+
+function showFinding(f) {
+  const d = f.detail || { pieces: [], options: [] };
+  highlight(f.sources);
+  side.innerHTML = `<div class="meta"><a href="#" id="back">← Overview</a></div>
+    <div class="finding c-${esc(f.type)}" style="cursor:default"><div class="k">${esc(TYPE_LABEL[f.type] || f.type)}</div><div class="t">${esc(f.title)}</div><p>${esc(f.body)}</p></div>
+    ${d.pieces.length ? `<div class="label-sm">The pieces</div>` : ""}
+    ${d.pieces.map(p => `<div class="piece c-${esc(f.type)}"><div class="origin">${esc(p.path)}</div>${p.quote ? `<blockquote>${esc(p.quote)}</blockquote>` : `<p class="meta">This text has changed or is gone since the check.</p>`}
+      ${p.source && srcById(p.source) ? `<a href="#" class="open" data-s="${esc(p.source)}">Open source →</a>` : ""}</div>`).join("")}
+    ${d.ranking ? `<div class="label-sm">Which one wins</div><p>${esc(d.ranking)}</p>` : ""}
+    ${d.effect ? `<div class="label-sm">What you'd notice</div><p>${esc(d.effect)}</p>` : ""}
+    ${d.options.length ? `<div class="label-sm">Ways to resolve</div>` : ""}
+    ${d.options.map((o, i) => `<div class="opt ${o.recommended ? "rec" : ""}"><div class="t">${o.recommended ? '<span class="badge">Recommended</span> ' : ""}${esc(o.title)}</div>
+      <p>${esc(o.how)}</p>${o.tradeoff ? `<p class="meta">${esc(o.tradeoff)}</p>` : ""}
+      <div class="triage"><button data-i="${i}" class="copy">Copy as prompt</button></div></div>`).join("")}`;
+  back();
+  side.querySelectorAll(".open").forEach(a => a.onclick = e => { e.preventDefault(); showSource(srcById(a.dataset.s)); highlight([a.dataset.s]); });
+  side.querySelectorAll(".copy").forEach(b => b.onclick = () => {
+    const o = d.options[b.dataset.i];
+    const where = d.pieces.map(p => `- ${p.path}`).join("\n");
+    navigator.clipboard?.writeText(`In ${W.folder}, wince found: "${f.title}". ${f.body}\nWhere:\n${where}\nApproach: ${o.title}. ${o.how}\nShow me the exact change before making it.`);
+    b.textContent = "Copied";
+  });
+  side.scrollTop = 0;
+}
+
+let linkSel, nodeSel;
+function draw() {
+  const withHarness = document.getElementById("harness").checked;
+  const src = W.sources.filter(s => (withHarness || s.kind !== "harness") && s.tokens > 0);
+  const nodes = [], links = [], idx = {};
+  const add = (id, name, type, ref) => { if (!(id in idx)) { idx[id] = nodes.length; nodes.push({ id, name, type, ref }); } return idx[id]; };
+  src.forEach(s => {
+    const L = add("L:" + s.layer, layerOf(s.layer).label, "layer", s.layer);
+    const S = add("S:" + s.id, s.label, "source", s.id);
+    const K = add("K:" + s.kind, W.kinds.find(k => k.id === s.kind).label, "kind", s.kind);
+    const T = add("T", "This session", "session");
+    for (const [a, b] of [[L, S], [S, K], [K, T]]) links.push({ source: a, target: b, value: s.tokens, layer: s.layer, sid: s.id });
+  });
+  const width = Math.max(480, document.querySelector(".canvas").clientWidth - 40);
+  const height = Math.max(520, src.length * 24);
+  const svg = d3.select("#sankey").attr("width", width).attr("height", height);
+  svg.selectAll("*").remove();
+  const g = d3.sankey().nodeWidth(12).nodePadding(8).nodeSort(null).extent([[1, 6], [width - 170, height - 6]])({ nodes: nodes.map(d => ({ ...d })), links: links.map(d => ({ ...d })) });
+  const color = n => n.type === "session" ? css("--ink") : n.type === "kind" ? css("--builtin") : css("--" + (n.type === "layer" ? n.ref : srcById(n.ref).layer));
+  linkSel = svg.append("g").selectAll("path").data(g.links).join("path").attr("class", "lnk").attr("d", d3.sankeyLinkHorizontal())
+    .attr("stroke", d => css("--" + d.layer)).attr("stroke-width", d => Math.max(1, d.width));
+  linkSel.on("click", (e, d) => { showSource(srcById(d.sid)); highlight([d.sid]); })
+    .on("dblclick", (e, d) => openSource(srcById(d.sid)));
+  linkSel.append("title").text(d => `${d.source.name} → ${d.target.name}: ~${fmt(d.value)} tokens\nClick to select · double-click to open${srcById(d.sid).path ? "" : " (no file)"}`);
+  nodeSel = svg.append("g").selectAll("g").data(g.nodes).join("g").attr("class", "nd");
+  nodeSel.append("rect").attr("x", d => d.x0).attr("y", d => d.y0).attr("height", d => Math.max(2, d.y1 - d.y0)).attr("width", d => d.x1 - d.x0)
+    .attr("rx", 2).attr("fill", color)
+    .on("click", (e, d) => {
+      if (d.type === "source") { showSource(srcById(d.ref)); highlight([d.ref]); }
+      else if (d.type === "layer") { overview(); highlight(W.sources.filter(s => s.layer === d.ref).map(s => s.id)); }
+      else if (d.type === "kind") { overview(); highlight(W.sources.filter(s => s.kind === d.ref).map(s => s.id)); }
+      else { overview(); highlight(null); }
+    });
+  nodeSel.append("text").attr("x", d => d.x1 + 6).attr("y", d => (d.y0 + d.y1) / 2).attr("dy", "0.35em").text(d => `${d.name}  ${fmt(d.value)}`);
+  nodeSel.filter(d => d.type === "source").each(function (d) {
+    const fs = W.findings.filter(f => f.sources.includes(d.ref));
+    d3.select(this).selectAll("circle").data(fs).join("circle")
+      .attr("cx", (f, i) => d.x0 - 7 - i * 9).attr("cy", (d.y0 + d.y1) / 2).attr("r", 3.5).attr("fill", f => css("--" + f.type) || css("--accent"))
+      .append("title").text(f => f.title);
+  });
+}
+function highlight(ids) {
+  if (!linkSel) return;
+  if (!ids || !ids.length) { linkSel.classed("dim", false); nodeSel.classed("dim", false); return; }
+  linkSel.classed("dim", d => !ids.includes(d.sid));
+  nodeSel.classed("dim", d => d.type === "source" && !ids.includes(d.ref));
+}
+function chips(el, arr, ghost) {
+  document.getElementById(el).innerHTML = arr.map((z, i) => `<span class="chip ${ghost ? "ghost" : ""}" data-i="${i}">${esc(z.label)}</span>`).join("") || '<span class="meta">Nothing.</span>';
+  document.querySelectorAll(`#${el} .chip`).forEach(c => c.onclick = () => { const z = arr[c.dataset.i];
+    side.innerHTML = `<div class="meta"><a href="#" id="back">← Overview</a></div><h2>${esc(z.label)}</h2><div class="origin">${esc(z.origin)}</div><p>${esc(z.detail || "")}</p>`; back(); });
+}
+chips("zero", W.zeroToken); chips("notloaded", W.notLoaded, true);
+document.getElementById("harness").onchange = draw;
+window.onresize = draw;
+addSplitter();
+draw(); overview();
+</script>
+</body>
+</html>

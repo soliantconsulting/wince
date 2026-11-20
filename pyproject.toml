@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wince"
+dynamic = ["version"]
+description = "See where everything in a Claude Code session comes from: CLAUDE.md files, memory, skills, plugins, hooks, MCP servers and connectors, as a sankey with findings."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+wince = "wince.core:main"
+
+[tool.setuptools]
+packages = ["wince"]
+
+[tool.setuptools.package-data]
+wince = ["app/*.html", "app/*.js", "app/*.css", "app/*.svg", "app/*.png", "app/vendor/*.js", "app/vendor/*.md"]
+
+[tool.setuptools.dynamic]
+version = { attr = "wince.core.VERSION" }
