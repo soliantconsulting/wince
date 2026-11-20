@@ -92,8 +92,8 @@ async function recentScans() {
 
 // POST to the API with a busy state on the button. Returns the reply (with status 501 passed through), or null after a toast.
 async function post(path, body, btn, busy, hint) {
-  const label = btn.querySelector("span"), was = label.textContent;
-  btn.disabled = true; label.textContent = busy;
+  const label = btn.querySelector("span"), was = label?.textContent;
+  btn.disabled = true; if (label) label.textContent = busy;
   if (hint) toast(hint, 0);
   try {
     const res = await fetch(path, { method: "POST", headers: API, body: JSON.stringify(body) });
@@ -106,7 +106,7 @@ async function post(path, body, btn, busy, hint) {
     failed(e);
     return null;
   } finally {
-    btn.disabled = false; label.textContent = was;
+    btn.disabled = false; if (label) label.textContent = was;
   }
 }
 

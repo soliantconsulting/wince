@@ -166,6 +166,12 @@ def main():
         wh.analyze = real
         assert call("/api/forget", {"folder": "~/code/proj"})[0] == 200 and "check" not in call(q)[1]["scan"]
 
+        # A dismissed note stays hidden for that folder.
+        notes = call(q)[1]["scan"]["notes"]
+        assert notes and all(set(n) == {"id", "text"} for n in notes), notes
+        assert call("/api/dismiss", {"folder": "~/code/proj", "note": notes[0]["id"]})[0] == 200
+        assert notes[0]["id"] not in [n["id"] for n in call(q)[1]["scan"]["notes"]]
+
         # The open endpoint opens only paths a live scan recorded; it never takes a path from the page.
         assert call("/api/open", {"folder": "~/code/proj", "source": "nope"})[0] == 404
         assert call("/api/open", {"folder": "~/code/proj", "path": "/etc/hosts"})[0] == 404
@@ -178,6 +184,17 @@ def main():
         except ValueError:
             assert open(bad).read() == "garbage"
         srv.shutdown()
+
+        # A folder renamed after its last session gets one note, not one per file gone and one per file new.
+        moved = os.path.join(home, "code", "newname")
+        w(os.path.join(moved, "CLAUDE.md"), "Moved rules.")
+        oldp = os.path.join(home, "code", "oldname")
+        w(os.path.join(wh.project_dir(moved), "m.jsonl"), "\n".join(json.dumps(x) for x in [
+            {"type": "user", "cwd": oldp, "version": "9.9.9", "timestamp": "2026-11-18T00:00:00Z"},
+            {"type": "attachment", "attachment": {"type": "instructions", "files": [{"path": os.path.join(oldp, "CLAUDE.md"), "type": "Project"}]}},
+            {"type": "attachment", "attachment": {"type": "prompt_snapshot", "systemPrompt": ["x"]}}, {"type": "assistant"}]))
+        mn = wh.scan(moved)["notes"]
+        assert any("moved from ~/code/oldname" in n for n in mn) and not any("newname/CLAUDE.md" in n or "oldname/CLAUDE.md" in n for n in mn), mn
 
         # Canary: a new Claude Code version whose log lacks something the old one had gets a note until it's back.
         cpath = os.path.join(home, "canary.json")

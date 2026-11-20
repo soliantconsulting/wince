@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wince · flow</title>
 <link rel="icon" type="image/png" href="soliant-curve.png">
-<link rel="stylesheet" href="style.css?v=15">
+<link rel="stylesheet" href="style.css?v=16">
 <script src="vendor/d3.min.js"></script>
 <script src="vendor/d3-sankey.min.js"></script>
 <style>
@@ -49,7 +49,7 @@
   <aside id="side" class="card"></aside>
 </main>
 <div id="toast" class="toast" role="status" hidden></div>
-<script src="common.js?v=15"></script>
+<script src="common.js?v=16"></script>
 <script type="module">
 const side = document.getElementById("side");
 document.querySelector("#check span").insertAdjacentHTML("beforebegin", icon("search"));
@@ -117,7 +117,7 @@ function overview() {
        <button class="btn-outline" id="check2">${icon("search")}<span>Find conflicts</span></button></div>`;
   side.innerHTML = `<h2>Overview</h2><div class="meta">Everything here reaches Claude before you type a word.</div>
     <div><span class="stat"><b>${fmt(total)}</b><small>tokens from sources you control</small></span><span class="stat"><b>${mine.length}</b><small>sources</small></span><span class="stat"><b>${W.findings.length}</b><small>findings</small></span></div>
-    ${W.notes.map(n => `<div class="note">${esc(n)}</div>`).join("")}
+    ${W.notes.map(n => `<div class="note"><span class="grow">${esc(n.text)}</span><button class="dismiss" data-n="${esc(n.id)}" title="Dismiss this note" aria-label="Dismiss this note">×</button></div>`).join("")}
     ${W.check?.stale ? `<div class="note">These files changed after the conflict check on ${day(W.check.checkedAt)}, so its findings may be out of date. Recheck conflicts to update them.</div>` : ""}
     <div class="label-sm row">Findings ${W.check ? checkCard : ""}</div>${W.check ? "" : checkCard}
     ${W.findings.map(findingHTML).join("") || '<div class="meta">None.</div>'}
@@ -125,6 +125,10 @@ function overview() {
   bindFindings();
   const c2 = document.getElementById("check2");
   if (c2) c2.onclick = () => check(c2);
+  side.querySelectorAll(".dismiss").forEach(b => b.onclick = async () => {
+    const r = await post("/api/dismiss", { folder: W.folder, config: cfgOf(W), note: b.dataset.n }, b, "");
+    if (r) { W.notes = W.notes.filter(n => n.id !== b.dataset.n); b.closest(".note").remove(); }
+  });
   const fg = document.getElementById("forget");
   if (fg) fg.onclick = () => forget(fg);
 }

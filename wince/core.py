@@ -158,7 +158,7 @@ def read_runtime(pdir):
     versions = set()
     for path in logs[:20]:
         rt = {"path": path, "date": None, "version": None, "hooks": [], "skills": None, "mcp": {}, "tools": [], "agents": [],
-              "instructions": [], "system": 0, "failed_mcp": [], "auth_mcp": [], "seen": set(), "skipped": 0}
+              "instructions": [], "system": 0, "failed_mcp": [], "auth_mcp": [], "seen": set(), "skipped": 0, "cwd": None}
         found = False
         try:
             f = open(path, encoding="utf-8", errors="replace")
@@ -172,6 +172,8 @@ def read_runtime(pdir):
                     continue
                 if not isinstance(o, dict):
                     continue
+                if isinstance(o.get("cwd"), str):
+                    rt["cwd"] = rt["cwd"] or o["cwd"]
                 if o.get("type") == "assistant":
                     break
                 rt["version"] = rt["version"] or o.get("version")
@@ -689,6 +691,17 @@ def _scan(folder):
         # Drift: instruction files the last session saw that aren't there now, or the reverse.
         then = {os.path.realpath(i["path"]) for i in rt["instructions"] if i.get("path") and i.get("type") != "AutoMem"}
         now = set(inst_files)
+        # A folder that was moved or renamed after the last session: its files show up as gone at the old path and new at
+        # the new one. Say that once instead of once per file.
+        old = os.path.realpath(rt["cwd"]) if rt["cwd"] and not os.path.exists(rt["cwd"]) else None
+        if old and old != folder:
+            moved = {p for p in then - now if p.startswith(old + os.sep) and folder + p[len(old):] in now}
+            if moved:
+                d = datetime.date.fromisoformat(rt["date"][:10]) if rt["date"] else None
+                notes.append(f"Your last session here ({f'{d:%b} {d.day}, {d.year}' if d else 'date unknown'}) ran before this folder moved from "
+                             f"{tilde(old)}. Start a Claude Code session here to refresh what's shown.")
+                then -= moved
+                now -= {folder + p[len(old):] for p in moved}
         for p in sorted(then - now):
             notes.append(f"The last session loaded {tilde(p)}, which no longer resolves for this folder.")
         for p in sorted(now - then):
@@ -1036,9 +1049,25 @@ def canary(sc, path=None):
     return sc
 
 
-def for_page(sc):
-    """A scan as the page gets it: full texts stay on the server, the page shows excerpts."""
-    return {**sc, "sources": [{k: v for k, v in s.items() if k != "text"} for s in sc["sources"]]}
+def note_id(text):
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def dismiss_note(key, nid, path=None):
+    """Hide one note for this folder and config folder. A note with different wording (a new date, say) shows again."""
+    def change(st):
+        d = st.setdefault("dismissed", {}).setdefault(key, [])
+        if nid not in d:
+            d.append(nid)
+            del d[:-100]
+    update_state(change, path)
+
+
+def for_page(sc, path=None):
+    """A scan as the page gets it: full texts stay on the server, the page shows excerpts, and dismissed notes are left out."""
+    hidden = set(load_state(path).get("dismissed", {}).get(scan_key(sc), []))
+    notes = [{"id": note_id(n), "text": n} for n in sc["notes"] if note_id(n) not in hidden]
+    return {**sc, "notes": notes, "sources": [{k: v for k, v in s.items() if k != "text"} for s in sc["sources"]]}
 
 
 # Runs inside osascript itself, so it needs no permission to control another app; "activate" brings the dialog to the front.
@@ -1156,7 +1185,7 @@ def make_server(port, state=None):
                     canary(sc, state)
                 except ValueError as e:
                     return self.reply(500, {"error": str(e)})
-                self.reply(200, {"scan": for_page(with_check(sc, state)), "recent": load_state(state)["recent"]})
+                self.reply(200, {"scan": for_page(with_check(sc, state), state), "recent": load_state(state)["recent"]})
 
         def do_POST(self):
             if not self.local() or not self.api():
@@ -1174,6 +1203,14 @@ def make_server(port, state=None):
                 return self.reply(200, {"folder": tilde(folder.rstrip(os.sep) or folder)} if folder else {"canceled": True})
             if self.path == "/api/open":
                 return self.open_source(req)
+            if self.path == "/api/dismiss":
+                if not (isinstance(req.get("folder"), str) and isinstance(req.get("note"), str)):
+                    return self.reply(400, {"error": "bad request"})
+                try:
+                    dismiss_note(f"{req['folder']}|{req.get('config') or '~/.claude'}", req["note"], state)
+                except ValueError as e:
+                    return self.reply(500, {"error": str(e)})
+                return self.reply(200, {"dismissed": req["note"]})
             if self.path not in ("/api/check", "/api/forget"):
                 return self.reply(404, {"error": "no such endpoint"})
             sc = self.live_scan(req)
